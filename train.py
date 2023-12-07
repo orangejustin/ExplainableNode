@@ -4,96 +4,123 @@ import torch
 from tqdm import tqdm
 from torch.cuda.amp import GradScaler, autocast
 import os
+from ExplainableNode import ExplainableNode  # Import ExplainableNode
+import wandb
 
 scaler = torch.cuda.amp.GradScaler()
 
-
-def train(model, dataloader, optimizer, criterion, explainable_node, epoch, device='cuda', add_new_pages=False, keep_only_last_step=False):
+def train(model, dataloader, optimizer, criterion, device, explainable_node=None):
     model.train()
-    explainable_node.register_hooks(model)
+    if explainable_node:
+        explainable_node.register_hooks(model)
 
-    running_loss = 0
-    correct, total = 0, 0
+    running_loss = 0.0
+    correct = 0
+    total = 0
 
-    for batch_idx, (inputs, targets) in enumerate(tqdm(dataloader, desc='Training', leave=False)):
+    for inputs, targets in tqdm(dataloader, desc='Training'):
         inputs, targets = inputs.to(device), targets.to(device)
+
         optimizer.zero_grad()
-        with autocast():
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
 
         running_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
         correct += (predicted == targets).sum().item()
 
-        if batch_idx % explainable_node.plot_interval == 0:
-            explainable_node.plot_values(epoch, batch_idx, add_new_pages=add_new_pages, keep_only_last_step=keep_only_last_step)
+        if explainable_node and batch_idx % explainable_node.plot_interval == 0:
+            explainable_node.plot_values(epoch, batch_idx)
             explainable_node.clear_values()
 
-    # Remove hooks after training
-    for hook in model.hooks:
-        hook.remove()
-    del model.hooks
+    if explainable_node:
+        for hook in model.hooks:
+            hook.remove()
+        del model.hooks
 
-    explainable_node.save_plots(epoch)
-
-    accuracy = correct / total
-    return running_loss / len(dataloader), accuracy
+    return running_loss / len(dataloader), correct / total
 
 
-def evaluate(model, dataloader, criterion, device='cuda', mode='Validate'):
-    assert mode in ['Validate', 'Test'], "Mode should be either 'Validate' or 'Test'"
+def validate(model, dataloader, criterion, device):
     model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
-    predictions = []
 
-    # Deactivate autograd for evaluation
     with torch.no_grad():
-        for data in tqdm(dataloader, desc=mode, leave=False):
-            inputs, labels = data[0].to(device), data[1].to(device)
+        for inputs, targets in tqdm(dataloader, desc='Validation'):
+            inputs, targets = inputs.to(device), targets.to(device)
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            loss = criterion(outputs, targets)
+
             running_loss += loss.item()
             _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
 
-            # Save predictions if in test mode
-            if mode == 'Test':
-                predictions.extend(predicted.cpu().numpy())
+    return running_loss / len(dataloader), correct / total
 
-    # Calculate average loss and accuracy
-    avg_loss = running_loss / len(dataloader)
-    accuracy = correct / total
+def test(model, dataloader, device):
+    model.eval()
+    correct = 0
+    total = 0
 
-    # Print evaluation results
-    print(f'{mode} Loss: {avg_loss:.4f}, {mode} Accuracy: {accuracy:.4f}')
+    with torch.no_grad():
+        for inputs, targets in tqdm(dataloader, desc='Testing'):
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs.data, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
 
-    # Return results (and predictions if in test mode)
-    return (avg_loss, accuracy, predictions) if mode == 'Test' else (avg_loss, accuracy)
+    return correct / total
 
 
-def experiment(model, train_loader, val_loader, test_loader, optimizer, scheduler, criterion, config, device='cuda', matrix_size=(4, 4), add_new_pages=False, keep_only_last_step=False):
+
+def experiment(model, train_loader, val_loader, optimizer, scheduler,
+               criterion, config, device='cuda', explainable_node=None):
+
+    wandb.login(key="c06ce00d5f99f931dfcbf6b470908fe8de32451c")
+    run = wandb.init(
+        name="Resnet-Benchmark",
+        reinit=True,
+        # id = 'zgni61f0',
+        # resume = "must",
+        project="ExplainableNode",
+        config=config
+    )
+
     best_val_acc = 0
-    explainable_node = ExplainableNode(matrix_size=matrix_size, plot_interval=5)
 
     for epoch in range(config['epochs']):
-        # Clear previous values at the start of each epoch
-        explainable_node.clear_values()
+        if explainable_node:
+            explainable_node.clear_values()
 
-        train_loss, train_acc = train(model, train_loader, optimizer, criterion, explainable_node, epoch, device, add_new_pages=add_new_pages, keep_only_last_step=keep_only_last_step)
+        train_loss, train_acc = train(model, train_loader, optimizer, criterion, device, explainable_node=None)
+        print(
+            f'Epoch [{epoch + 1}/{config["epochs"]}] - Training Loss: {train_loss:.4f}, Training Accuracy: {train_acc:.4f}')
 
-        print('Training:', train_loss, train_acc)
+        if val_loader is not None:
+            val_loss, val_acc = validate(model, val_loader, criterion, device)
+            print(
+                f'Epoch [{epoch + 1}/{config["epochs"]}] - Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}')
 
-        # Additional code for validation and testing, if any
-        # ...
+            # Update the best validation accuracy
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
 
-    # Additional code for the rest of the experiment function
-    # ...
+            # Step the scheduler based on the validation loss
+            if scheduler is not None:
+                scheduler.step(val_loss)
 
+            curr_lr = float(optimizer.param_groups[0]['lr'])
+            wandb.log({"train_loss": train_loss, 'train_Acc': train_acc, 'validation_Acc': val_acc,
+                        'validation_loss': val_loss, "learning_Rate": curr_lr})
+    if explainable_node:
+        explainable_node.save_plots(epoch)
+
+    # run.finish()
+    return best_val_acc
