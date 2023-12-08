@@ -1,39 +1,72 @@
 import torch
+import numpy as np
 
 class ExplainableNode:
-    def __init__(self):
+    def __init__(self, should_compute_psm=False, should_compute_lcc=False):
         self.activation_values = {}
         self.gradient_sums = {}
+        self.layer_names = {}
         self.hooks = []
-        self.batch_metrics = []  # Store metrics for each batch
+        self.epoch_metrics = {}  # Change from list to dictionary
+        self.should_compute_psm = should_compute_psm
+        self.should_compute_lcc = should_compute_lcc
 
-    def register_hooks(self, model, layers):
+    def register_hooks(self, model, layers, layer_names):
+        # Clear existing hooks
         for hook in self.hooks:
             hook.remove()
         self.hooks = []
 
-        for layer in layers:
+        # Register hooks and assign layer names
+        for layer, name in zip(layers, layer_names):
+            self.layer_names[layer] = name
             forward_hook = layer.register_forward_hook(self.forward_hook_fn)
             backward_hook = layer.register_backward_hook(self.backward_hook_fn)
             self.hooks.extend([forward_hook, backward_hook])
 
     def forward_hook_fn(self, module, input, output):
-        self.activation_values[module] = output.detach()
+        self.activation_values[self.layer_names[module]] = output.detach()
 
     def backward_hook_fn(self, module, grad_input, grad_output):
-        grad = grad_output[0].detach()
-        self.gradient_sums[module] = grad.sum(dim=0)
+        self.gradient_sums[self.layer_names[module]] = grad_output[0].detach().sum(dim=0)
 
     def calculate_metrics(self):
-        # This function now returns only the metric values for simplicity
-        metrics = {}
-        for layer in self.activation_values.keys():
-            act = self.activation_values[layer]
-            grad_sum = self.gradient_sums[layer]
-            gis = torch.mul(act, grad_sum).mean().item()
-            metrics[str(layer)] = gis  # Convert layer to string to identify it
-        self.batch_metrics.append(gis)
-        return metrics
+        # Check if layers are already in epoch_metrics; if not, initialize
+        for layer_name in self.layer_names.values():
+            if layer_name not in self.epoch_metrics:
+                self.epoch_metrics[layer_name] = {'PSM': [], 'LCC': []}
+
+        # Compute and append metrics
+        if self.should_compute_psm:
+            psm_metrics = self._compute_psm()
+            for layer, value in psm_metrics.items():
+                self.epoch_metrics[layer]['PSM'].append(value)
+
+        if self.should_compute_lcc:
+            lcc_metrics = self._compute_lcc()
+            for layer, value in lcc_metrics.items():
+                self.epoch_metrics[layer]['LCC'].append(value)
+
+        return self.epoch_metrics
+
+    def get_aggregated_epoch_metrics(self):
+        # Aggregate metrics
+        aggregated_metrics = {}
+        for layer, metrics in self.epoch_metrics.items():
+            aggregated_metrics[layer] = {metric: np.mean(values) for metric, values in metrics.items()}
+        return aggregated_metrics
+
+    def _compute_psm(self):
+        return {name: torch.mean(torch.abs(grads)).item() for name, grads in self.gradient_sums.items()}
+
+    def _compute_lcc(self):
+        lcc_values = {}
+        for name, activations in self.activation_values.items():
+            activations_flat = activations.view(activations.size(0), -1)
+            gradients_flat = self.gradient_sums[name].view(self.gradient_sums[name].size(0), -1)
+            lcc = np.corrcoef(activations_flat.cpu().numpy(), gradients_flat.cpu().numpy(), rowvar=False)
+            lcc_values[name] = lcc
+        return lcc_values
 
     def clear_values(self):
         self.activation_values.clear()
@@ -43,4 +76,5 @@ class ExplainableNode:
         for hook in self.hooks:
             hook.remove()
         self.hooks = []
+
 

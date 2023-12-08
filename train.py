@@ -13,8 +13,11 @@ def train(model, dataloader, optimizer, criterion, explainable_node, device='cud
     model.train()
     running_loss = 0
     correct, total = 0, 0
-
-    explainable_node.register_hooks(model, [model.fc])  # Example layer
+    if explainable_node is not None:
+        model.explainable_node = explainable_node
+        # Register hooks for specified layers with names
+        explainable_node.register_hooks(model, [model.layer3],
+                                            ['layer3'])
 
     for inputs, targets in tqdm(dataloader, desc='Training', leave=False):
         inputs, targets = inputs.to(device), targets.to(device)
@@ -31,22 +34,22 @@ def train(model, dataloader, optimizer, criterion, explainable_node, device='cud
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)
         correct += (predicted == targets).sum().item()
-
-        # Calculate and store metrics after each batch
-        explainable_node.calculate_metrics()
-
-        # Clear values for the next batch
-        explainable_node.clear_values()
+        if explainable_node is not None:
+            # Calculate and store metrics after each batch
+            explainable_node.calculate_metrics()
+            # Clear values for the next batch
+            explainable_node.clear_values()
 
     accuracy = correct / total
 
-    # Aggregate batch metrics for the epoch
-    epoch_metrics = explainable_node.batch_metrics
-    explainable_node.batch_metrics = []  # Reset for the next epoch
-
-    print(f"Epoch Metrics: {epoch_metrics}")
+    if explainable_node is not None:
+        # After completing the epoch, get aggregated metrics
+        aggregated_epoch_metrics = explainable_node.get_aggregated_epoch_metrics()
+        print(f"Aggregated Epoch Metrics: {aggregated_epoch_metrics}")
+        explainable_node.clear_values()  # Clear for next epoch
 
     return running_loss / len(dataloader), accuracy
+
 
 
 
@@ -90,15 +93,15 @@ def experiment(model, train_loader, val_loader, optimizer, scheduler, criterion,
                config, device='cuda', explainable_node=None):
 
 
-    # wandb.login(key="c06ce00d5f99f931dfcbf6b470908fe8de32451c")
-    # run = wandb.init(
-    #     name="Resnet-Benchmark",
-    #     reinit=True,
-    #     # id = 'zgni61f0',
-    #     # resume = "must",
-    #     project="ExplainableNode",
-    #     config=config
-    # )
+    wandb.login(key="c06ce00d5f99f931dfcbf6b470908fe8de32451c")
+    run = wandb.init(
+        name="Resnet-Benchmark",
+        reinit=True,
+        # id = 'zgni61f0',
+        # resume = "must",
+        project="ExplainableNode",
+        config=config
+    )
 
     # path = './'
 
@@ -126,8 +129,8 @@ def experiment(model, train_loader, val_loader, optimizer, scheduler, criterion,
                 scheduler.step(val_loss)
 
             curr_lr = float(optimizer.param_groups[0]['lr'])
-            # wandb.log({"train_loss": train_loss, 'train_Acc': train_acc, 'validation_Acc': val_acc,
-            #             'validation_loss': val_loss, "learning_Rate": curr_lr})
+            wandb.log({"train_loss": train_loss, 'train_Acc': train_acc, 'validation_Acc': val_acc,
+                        'validation_loss': val_loss, "learning_Rate": curr_lr})
 
             # torch.save(
             #     {'model_state_dict': model.state_dict(),
