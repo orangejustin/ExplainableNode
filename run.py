@@ -20,7 +20,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print("Device: ", device)
 
 config = {
-    'epochs': 80,
+    'epochs': 1,
     'batch_size': 64
 }
 
@@ -56,7 +56,12 @@ scheduler = ReduceLROnPlateau(optimizer, 'max', patience=5, factor=0.7)
 
 # Optional: ExplainableNode instance
 # explainable_node = ExplainableNode(matrix_size=(4, 4), plot_interval=5)
+explainable_node = ExplainableNode()
 
-# Training and Evaluation
-experiment(model, train_loader, val_loader, optimizer, scheduler,
-           criterion, config, device, explainable_node=None)
+experiment(model, train_loader, None, optimizer,
+           scheduler, criterion, config, device='cuda', explainable_node=explainable_node)
+
+
+# # Training and Evaluation
+# experiment(model, train_loader, val_loader, optimizer, scheduler,
+#            criterion, config, device, explainable_node=None)

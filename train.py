@@ -9,21 +9,21 @@ import wandb
 
 scaler = torch.cuda.amp.GradScaler()
 
-def train(model, dataloader, optimizer, criterion, device, explainable_node=None):
+def train(model, dataloader, optimizer, criterion, explainable_node, device='cuda'):
     model.train()
-    if explainable_node:
-        explainable_node.register_hooks(model)
+    running_loss = 0
+    correct, total = 0, 0
 
-    running_loss = 0.0
-    correct = 0
-    total = 0
+    explainable_node.register_hooks(model, [model.fc])  # Example layer
 
-    for inputs, targets in tqdm(dataloader, desc='Training'):
+    for inputs, targets in tqdm(dataloader, desc='Training', leave=False):
         inputs, targets = inputs.to(device), targets.to(device)
-
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
+
+        with autocast():
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+
         loss.backward()
         optimizer.step()
 
@@ -32,16 +32,22 @@ def train(model, dataloader, optimizer, criterion, device, explainable_node=None
         total += targets.size(0)
         correct += (predicted == targets).sum().item()
 
-        if explainable_node and batch_idx % explainable_node.plot_interval == 0:
-            explainable_node.plot_values(epoch, batch_idx)
-            explainable_node.clear_values()
+        # Calculate and store metrics after each batch
+        explainable_node.calculate_metrics()
 
-    if explainable_node:
-        for hook in model.hooks:
-            hook.remove()
-        del model.hooks
+        # Clear values for the next batch
+        explainable_node.clear_values()
 
-    return running_loss / len(dataloader), correct / total
+    accuracy = correct / total
+
+    # Aggregate batch metrics for the epoch
+    epoch_metrics = explainable_node.batch_metrics
+    explainable_node.batch_metrics = []  # Reset for the next epoch
+
+    print(f"Epoch Metrics: {epoch_metrics}")
+
+    return running_loss / len(dataloader), accuracy
+
 
 
 def validate(model, dataloader, criterion, device):
@@ -80,18 +86,21 @@ def test(model, dataloader, device):
 
 
 
-def experiment(model, train_loader, val_loader, optimizer, scheduler,
-               criterion, config, device='cuda', explainable_node=None):
+def experiment(model, train_loader, val_loader, optimizer, scheduler, criterion,
+               config, device='cuda', explainable_node=None):
 
-    wandb.login(key="c06ce00d5f99f931dfcbf6b470908fe8de32451c")
-    run = wandb.init(
-        name="Resnet-Benchmark",
-        reinit=True,
-        # id = 'zgni61f0',
-        # resume = "must",
-        project="ExplainableNode",
-        config=config
-    )
+
+    # wandb.login(key="c06ce00d5f99f931dfcbf6b470908fe8de32451c")
+    # run = wandb.init(
+    #     name="Resnet-Benchmark",
+    #     reinit=True,
+    #     # id = 'zgni61f0',
+    #     # resume = "must",
+    #     project="ExplainableNode",
+    #     config=config
+    # )
+
+    # path = './'
 
     best_val_acc = 0
 
@@ -99,7 +108,7 @@ def experiment(model, train_loader, val_loader, optimizer, scheduler,
         if explainable_node:
             explainable_node.clear_values()
 
-        train_loss, train_acc = train(model, train_loader, optimizer, criterion, device, explainable_node=None)
+        train_loss, train_acc = train(model, train_loader, optimizer, criterion, explainable_node=explainable_node)
         print(
             f'Epoch [{epoch + 1}/{config["epochs"]}] - Training Loss: {train_loss:.4f}, Training Accuracy: {train_acc:.4f}')
 
@@ -117,10 +126,18 @@ def experiment(model, train_loader, val_loader, optimizer, scheduler,
                 scheduler.step(val_loss)
 
             curr_lr = float(optimizer.param_groups[0]['lr'])
-            wandb.log({"train_loss": train_loss, 'train_Acc': train_acc, 'validation_Acc': val_acc,
-                        'validation_loss': val_loss, "learning_Rate": curr_lr})
-    if explainable_node:
-        explainable_node.save_plots(epoch)
+            # wandb.log({"train_loss": train_loss, 'train_Acc': train_acc, 'validation_Acc': val_acc,
+            #             'validation_loss': val_loss, "learning_Rate": curr_lr})
+
+            # torch.save(
+            #     {'model_state_dict': model.state_dict(),
+            #      'optimizer_state_dict': optimizer.state_dict(),
+            #      'scheduler_state_dict': scheduler.state_dict(),
+            #      metric[0]: metric[1],
+            #      'epoch': epoch},
+            #     path
+            # )
 
     # run.finish()
+    # explainable_node.epoch_metrics.clear()
     return best_val_acc
